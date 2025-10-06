@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+*.venv
+*.egg-info/
+*.egg
+*.log
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Python caches
+*.sqlite3
+*.db
+
+# Uploads (ถ้าไม่อยาก commit ไฟล์ภาพ)
+uploads/
+
+# Pipenv / Poetry
+Pipfile.lock
+poetry.lock
+
+# Byte-compiled / optimized / DLL files
+*.pyc
+*.pyo
+*.pyd
+
+# Test / coverage
+.coverage
+htmlcov/
+.tox/
+.nox/
+pytest_cache/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Misc
+*.swp
+*.swo
