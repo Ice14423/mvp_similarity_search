@@ -1,14 +1,17 @@
+import base64
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import shutil, os, uuid, json
+import json
+import psycopg2
 from db import cursor, conn
 from utils import get_text_embedding, get_image_embedding, cosine_similarity
 import numpy as np
+import io
+from PIL import Image
 
 app = FastAPI()
 
-# CORS
+# ------------------- CORS -------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,92 +19,92 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# Serve static files
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-
-# ---------------- Upload Item ----------------
+# ------------------- Upload Item -------------------
 @app.post("/upload")
 async def upload_item(
     name: str = Form(...),
     description: str = Form(...),
     file: UploadFile = File(None)
 ):
-    file_path = None
     text_vec = get_text_embedding(description)
     image_vec = None
+    image_blob = None
 
-    # Handle file upload
     if file:
-        filename = f"{uuid.uuid4()}_{file.filename}"
-        file_path = os.path.join(UPLOAD_DIR, filename)
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-        image_vec = get_image_embedding(file_path)
-        image_url = f"/uploads/{filename}"
-    else:
-        image_url = None
+        # อ่านไฟล์ภาพจาก memory
+        image_bytes = await file.read()
+        image_blob = image_bytes  # เก็บ blob ไว้ในฐานข้อมูล
+        file.file.seek(0)  # รีเซ็ต pointer ให้ใช้ซ้ำได้
 
-    # Store embeddings as JSON strings
+        # ใช้ฟังก์ชัน utils ที่แก้ไว้ใหม่
+        image_vec = get_image_embedding(file)
+
     cursor.execute(
-        "INSERT INTO items (name, description, image_path, text_embedding, image_embedding) VALUES (%s, %s, %s, %s, %s)",
+        """
+        INSERT INTO items (name, description, image_blob, text_embedding, image_embedding)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
         (
             name,
             description,
-            image_url,
+            psycopg2.Binary(image_blob) if image_blob else None,
             json.dumps(text_vec.tolist()),
             json.dumps(image_vec.tolist()) if image_vec is not None else None
         )
     )
     conn.commit()
-    return {"status": "success", "image_url": image_url}
 
-# ---------------- Search Items ----------------
+    return {"status": "success"}
+
+
+# ------------------- Search Items -------------------
 @app.post("/search")
 async def search_item(text: str = Form(None), file: UploadFile = File(None)):
     query_text_vec = np.array(get_text_embedding(text), dtype=float) if text else None
     query_image_vec = None
-    tmp_path = None
 
-    # Handle temporary file for image query
+    # อ่านไฟล์ภาพที่อัปโหลดเพื่อค้นหา
     if file:
-        tmp_filename = f"{uuid.uuid4()}_{file.filename}"
-        tmp_path = os.path.join(UPLOAD_DIR, tmp_filename)
-        with open(tmp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-        query_image_vec = np.array(get_image_embedding(tmp_path), dtype=float)
+        await file.read()
+        file.file.seek(0)  # reset pointer
+        query_image_vec = np.array(get_image_embedding(file), dtype=float)
 
-    cursor.execute("SELECT id, name, description, image_path, text_embedding, image_embedding FROM items")
+    # ดึงข้อมูลทั้งหมดจาก DB
+    cursor.execute("SELECT id, name, description, image_blob, text_embedding, image_embedding FROM items")
     rows = cursor.fetchall()
+
     results = []
 
     for r in rows:
-        id, name, description, image_url, text_vec_str, image_vec_str = r
+        id, name, description, image_blob, text_vec_str, image_vec_str = r
         score = 0.0
 
-        # Compare text embeddings
-        if query_text_vec is not None and text_vec_str:
+        # Text embedding
+        text_vec = None
+        if text_vec_str:
             text_vec = np.array(json.loads(text_vec_str), dtype=float)
-            score += cosine_similarity(text_vec, query_text_vec)
+            if query_text_vec is not None:
+                score += cosine_similarity(text_vec, query_text_vec)
 
-        # Compare image embeddings
-        if query_image_vec is not None and image_vec_str:
+        # Image embedding
+        image_vec = None
+        if image_vec_str:
             image_vec = np.array(json.loads(image_vec_str), dtype=float)
-            score += cosine_similarity(image_vec, query_image_vec)
+            if query_image_vec is not None:
+                score += cosine_similarity(image_vec, query_image_vec)
+
+        # แปลง image_blob → base64
+        image_base64 = base64.b64encode(image_blob).decode('utf-8') if image_blob else None
 
         results.append({
             "id": id,
             "name": name,
             "description": description,
-            "image_url": image_url,
-            "score": float(score)  # ensure JSON serializable
+            "image_base64": image_base64,
+            "score": float(score),
+            "text_vector": text_vec.tolist() if text_vec is not None else None,
+            "image_vector": image_vec.tolist() if image_vec is not None else None   # <-- เพิ่มตรงนี้
         })
-
-    # Clean up temporary file
-    if tmp_path and os.path.exists(tmp_path):
-        os.remove(tmp_path)
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return {"results": results[:5]}
